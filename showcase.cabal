@@ -27,6 +27,8 @@ executable showcase
 
     default-language: Haskell2010
     default-extensions:
+        DerivingStrategies,
+        GeneralizedNewtypeDeriving,
         OverloadedStrings
 
     ghc-options:
