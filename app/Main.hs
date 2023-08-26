@@ -11,23 +11,17 @@ import qualified Dhall.JSON as DhallJSON
 import qualified Dhall.Map as Map
 import qualified Network.Wai.Application.Static as Wai
 import qualified Network.Wai.Handler.Warp as Warp
+import qualified Path
 import qualified System.Directory as Directory
-import qualified System.FilePath as FilePath
 import qualified System.FSNotify as FSNotify
 import qualified Text.DocLayout as DocLayout
 import qualified Text.DocTemplates as DocTemplates
-import System.FilePath ((</>))
+import Path ((</>), Path, Abs, Dir, File, Rel)
 
-isDataFile :: FilePath -> Bool
+isDataFile :: Path b File -> Bool
 isDataFile filePath =
-     FilePath.takeBaseName filePath /= "website"
-  && FilePath.takeExtension filePath == ".dhall"
-
-lookupDataFolder :: IO FilePath
-lookupDataFolder = Directory.makeAbsolute "data/"
-
-lookupDistFolder :: IO FilePath
-lookupDistFolder = Directory.makeAbsolute "dist/"
+     Path.fromRelFile (Path.filename filePath) /= "website.dhall"
+  && Path.fileExtension filePath == Just ".dhall"
 
 main :: IO ()
 main = do
@@ -37,34 +31,48 @@ main = do
   FSNotify.withManager $ \manager -> do
     _ <- FSNotify.watchDir
       manager
-      (dataPath showcaseContext)
+      (Path.fromAbsDir (dataPath showcaseContext))
       (const True)
       (processFSNotifyEvent showcaseContext)
 
     putStrLn "Recompiling HTML..."
     runShowcase showcaseContext $ do
-      liftIO (Directory.removePathForcibly (distPath showcaseContext))
-      compileAllHTML (dataPath showcaseContext)
+      liftIO (Directory.removePathForcibly
+        (Path.fromAbsDir (distPath showcaseContext)))
+      compileAllHTML
 
     putStrLn "Running webserver on 8000..."
     let waiSettings =
-          Wai.defaultWebAppSettings (distPath showcaseContext)
+          Wai.defaultWebAppSettings
+            (Path.fromAbsDir (distPath showcaseContext))
     Warp.run 8000 (Wai.staticApp waiSettings)
 
 processFSNotifyEvent :: ShowcaseContext -> FSNotify.Event -> IO ()
 processFSNotifyEvent showcaseContext event = do
   let processFile filePath
         | isDataFile filePath = compileHTML filePath
-        | otherwise = compileAllHTML filePath
+        | otherwise = compileAllHTML
 
   runShowcase showcaseContext $ do
     case event of
       FSNotify.Added { FSNotify.eventPath = filePath } ->
-        processFile filePath
+        case Path.parseAbsFile filePath of
+          Just absFilePath ->
+            processFile absFilePath
+          Nothing ->
+            pure ()
       FSNotify.Modified { FSNotify.eventPath = filePath } ->
-        processFile filePath
-      FSNotify.Removed { FSNotify.eventPath = filePath } ->
-        removeHTML filePath
+        case Path.parseAbsFile filePath of
+          Just absFilePath ->
+            processFile absFilePath
+          Nothing ->
+            pure ()
+      FSNotify.Removed { FSNotify.eventPath = filePath } -> do
+        case Path.parseAbsFile filePath of
+          Just absFilePath ->
+            removeHTML absFilePath
+          Nothing ->
+            pure ()
 
       FSNotify.ModifiedAttributes {} ->
         pure ()
@@ -76,53 +84,70 @@ processFSNotifyEvent showcaseContext event = do
       FSNotify.Unknown { FSNotify.eventString = eventString } ->
         putStrLn ("Unknown event: " <> eventString)
 
-distHtmlFileName :: FilePath -> FilePath
-distHtmlFileName filePath =
-  let fileName = FilePath.takeBaseName filePath
-  in  fileName <> ".html"
-
-compileAllHTML :: FilePath -> Showcase ()
-compileAllHTML filePath = do
-  let directory = FilePath.takeDirectory filePath
-  relativePaths <- liftIO (Directory.listDirectory directory)
-
-  let absolutePaths = (directory </>) <$> relativePaths
+compileAllHTML :: Showcase ()
+compileAllHTML = do
+  dataFolder <- asks dataPath
+  listDirResult <- liftIO (Directory.listDirectory (Path.fromAbsDir dataFolder))
+  let relativePaths = concatMap Path.parseRelFile listDirResult
+  let absolutePaths = (dataFolder </>) <$> relativePaths
       filesToCompile = filter isDataFile absolutePaths
   traverse_ compileHTML filesToCompile
 
-compileHTML :: FilePath -> Showcase ()
+compileHTML :: Path Abs File -> Showcase ()
 compileHTML filePath = do
-  distFolder <- asks distPath
-  let htmlPath = distFolder <> distHtmlFileName filePath
+  mDistFile <- makeDistFilePath filePath
+  case mDistFile of
+    Nothing ->
+      pure ()
 
-  expr <- liftIO (Dhall.inputExpr (T.pack ("." </> filePath)))
-  case dhallToItem expr of
-    Left err ->
-      putStrLn ("Cannot read " <> filePath <> "; " <> show err)
-
-    Right item -> do
-      res <- liftIO (DocTemplates.compileTemplateFile (templatePath item))
-      case res of
+    Just distFile -> do
+      expr <- liftIO (Dhall.inputExpr (T.pack (Path.fromAbsFile filePath)))
+      case dhallToItem expr of
         Left err ->
-          putStrLn ("Cannot compile template " <> templatePath item <> "; " <> err)
+          putStrLn ("Cannot read " <> Path.fromAbsFile filePath <> "; " <> show err)
 
-        Right template -> do
-          let
-            doc = DocTemplates.renderTemplate template (metadata item)
-            renderedText = DocLayout.render Nothing doc
+        Right item -> do
+          res <- liftIO (DocTemplates.compileTemplateFile (templatePath item))
+          case res of
+            Left err ->
+              putStrLn ("Cannot compile template " <> templatePath item <> "; " <> err)
 
-          -- TODO: Debouncing?
-          putStrLn ("Writing " <> htmlPath <> "...")
-          liftIO (Directory.createDirectoryIfMissing True "dist")
-          writeFile htmlPath renderedText
+            Right template -> do
+              let
+                doc = DocTemplates.renderTemplate template (metadata item)
+                renderedText = DocLayout.render Nothing doc
 
-removeHTML :: FilePath -> Showcase ()
+              -- TODO: Debouncing?
+              putStrLn ("Writing " <> Path.fromAbsFile distFile <> "...")
+              liftIO (Directory.createDirectoryIfMissing True "dist")
+              writeFile (Path.fromAbsFile distFile) renderedText
+
+removeHTML :: Path Abs File -> Showcase ()
 removeHTML filePath = do
-  distFolder <- asks distPath
-  let htmlPath = distFolder <> distHtmlFileName filePath
+  mDistFile <- makeDistFilePath filePath
+  case mDistFile of
+    Nothing -> do
+      pure ()
 
-  putStrLn ("Removing " <> htmlPath <> "...")
-  liftIO (Directory.removeFile htmlPath)
+    Just distFile -> do
+      putStrLn ("Removing " <> Path.fromAbsFile distFile <> "...")
+      liftIO (Directory.removeFile (Path.fromAbsFile distFile))
+
+-- Tries to create the path of the corresponding dist file.
+makeDistFilePath :: Path Abs File -> Showcase (Maybe (Path Abs File))
+makeDistFilePath filePath = do
+  dataFolder <- asks dataPath
+  distFolder <- asks distPath
+
+  if dataFolder `Path.isProperPrefixOf` filePath
+  then
+    pure $ do
+      relFile <- Path.stripProperPrefix dataFolder filePath
+      distFile <- Path.replaceExtension ".html" relFile
+      Just (distFolder </> distFile)
+  else
+    pure Nothing
+
 
 --------------------------------------------------------------------------------
 -- Monad Stack
@@ -147,24 +172,30 @@ runShowcase context (Showcase showcase) = do
 -- | Contains variables commonly used throughout all Showcase operations.
 data ShowcaseContext =
   ShowcaseContext
-    { workingPath :: FilePath
+    { workingPath :: Path Abs Dir
       -- ^ The absolute path that all relative paths will be relative to.
-    , dataPath :: FilePath
+    , relDataPath :: Path Rel Dir
       -- ^ The relative path to the directory containing the source data.
-    , distPath :: FilePath
+    , relDistPath :: Path Rel Dir
       -- ^ The relative path to the directory containing the generated files.
     }
+
+dataPath :: ShowcaseContext -> Path Abs Dir
+dataPath context =
+  workingPath context </> relDataPath context
+
+distPath :: ShowcaseContext -> Path Abs Dir
+distPath context =
+  workingPath context </> relDistPath context
 
 -- | Creates the default showcase context, which assumes that the working
 -- directory is the same as the current working directory.
 defaultShowcaseContext :: IO ShowcaseContext
 defaultShowcaseContext = do
-  cwd <- Directory.makeAbsolute "."
-  pure ShowcaseContext
-    { workingPath = cwd
-    , dataPath = "data/"
-    , distPath = "dist/"
-    }
+  ShowcaseContext
+    <$> (Path.parseAbsDir =<< Directory.makeAbsolute ".")
+    <*> Path.parseRelDir "data"
+    <*> Path.parseRelDir "dist"
 
 --------------------------------------------------------------------------------
 -- Dhall Types
