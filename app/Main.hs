@@ -9,18 +9,34 @@ import qualified System.FilePath as FilePath
 import qualified System.FSNotify as FSNotify
 import System.FilePath ((</>))
 
+isWebsite :: FilePath -> Bool
+isWebsite filePath = FilePath.takeBaseName filePath == "website"
+
+lookupDataFolder :: IO FilePath
+lookupDataFolder = Directory.makeAbsolute "data/"
+
+lookupDistFolder :: IO FilePath
+lookupDistFolder = Directory.makeAbsolute "dist/"
+
 main :: IO ()
 main = do
+  dataFolder <- lookupDataFolder
+  distFolder <- lookupDistFolder
+
   putStrLn "Setting up FSNotify..."
   FSNotify.withManager $ \manager -> do
     _ <- FSNotify.watchDir
       manager
-      "data/"
+      dataFolder
       (const True)
       processFSNotifyEvent
 
+    putStrLn "Recompiling HTML..."
+    Directory.removePathForcibly distFolder
+    compileAllHTML dataFolder
+
     putStrLn "Running webserver on 8000..."
-    Warp.run 8000 (Wai.staticApp (Wai.defaultWebAppSettings "dist"))
+    Warp.run 8000 (Wai.staticApp (Wai.defaultWebAppSettings distFolder))
 
 processFSNotifyEvent :: FSNotify.Event -> IO ()
 processFSNotifyEvent event = do
@@ -41,8 +57,10 @@ processFSNotifyEvent event = do
     FSNotify.Unknown { FSNotify.eventString = eventString } ->
       putStrLn ("Unknown event: " <> eventString)
 
-isWebsite :: FilePath -> Bool
-isWebsite filePath = FilePath.takeBaseName filePath == "website"
+distHtmlFileName :: FilePath -> FilePath
+distHtmlFileName filePath =
+  let fileName = FilePath.takeBaseName filePath
+  in  fileName <> ".html"
 
 compileAllHTML :: FilePath -> IO ()
 compileAllHTML filePath = do
@@ -50,17 +68,13 @@ compileAllHTML filePath = do
   relativePaths <- Directory.listDirectory directory
 
   let absolutePaths = (directory </>) <$> relativePaths
-      filesToCompile = filter (/= filePath) absolutePaths
+      filesToCompile = filter (not . isWebsite) absolutePaths
   traverse_ compileHTML filesToCompile
-
-distHtmlPath :: FilePath -> FilePath
-distHtmlPath filePath =
-  let fileName = FilePath.takeBaseName filePath
-  in  "dist/" <> fileName <> ".html"
 
 compileHTML :: FilePath -> IO ()
 compileHTML filePath = do
-  let htmlPath = distHtmlPath filePath
+  distFolder <- lookupDistFolder
+  let htmlPath = distFolder <> distHtmlFileName filePath
 
   -- TODO: Debouncing?
   putStrLn ("Writing " <> htmlPath <> "...")
@@ -70,6 +84,8 @@ compileHTML filePath = do
 
 removeHTML :: FilePath -> IO ()
 removeHTML filePath = do
-  let htmlPath = distHtmlPath filePath
+  distFolder <- lookupDistFolder
+  let htmlPath = distFolder <> distHtmlFileName filePath
+
   putStrLn ("Removing " <> htmlPath <> "...")
   Directory.removeFile htmlPath
