@@ -5,7 +5,7 @@ let Service = < Twitch | YouTube >
 
 let RawLink = { id : Text, service : Service }
 
-let ProcessedLink = { url : Text, service : Service }
+let ProcessedLink = { id : Text, url : Text, service : Service }
 
 let RawShort = { links : List RawLink, name : Text }
 
@@ -37,6 +37,7 @@ let ProcessedSchema =
 
 let processLink =
       \(link : RawLink) ->
+        link //
         { url =
             merge
               { Twitch =
@@ -45,26 +46,18 @@ let processLink =
                   "https://www.youtube.com/watch?v=${link.id}"
               }
               link.service
-        , service = link.service
         } : ProcessedLink
 
 let processShort =
       \(short : RawShort) ->
-        { links = List/map RawLink ProcessedLink processLink short.links
-        , name = short.name
-        } : ProcessedShort
+        short //
+          { links = List/map RawLink ProcessedLink processLink short.links
+          } : ProcessedShort
 
 let processSchema =
   \(schema : RawSchema) ->
-      { duration = schema.duration
-      , shorts = List/map RawShort ProcessedShort processShort schema.shorts
-      , tags = schema.tags
-      , thumbPath = schema.thumbPath
-      , thumbUri = schema.thumbUri
-      , timestamp = schema.timestamp
-      , title = schema.title
-      , videoId = schema.videoId
-      }
-    : ProcessedSchema
+      schema //
+        { shorts = List/map RawShort ProcessedShort processShort schema.shorts
+        } : ProcessedSchema
 
 in  { Service, processSchema }
