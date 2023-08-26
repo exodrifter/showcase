@@ -1,6 +1,3 @@
-{-# LANGUAGE DeriveGeneric #-}
-{-# LANGUAGE DeriveAnyClass #-}
-
 module Main where
 
 import qualified Data.Aeson as Aeson
@@ -205,7 +202,7 @@ data Item =
   Item
     { templatePath :: FilePath
     , metadata :: Aeson.Value
-    } deriving (Generic, Aeson.FromJSON)
+    }
 
 dhallToString :: Core.Expr Void Void -> Either DhallJSON.CompileError String
 dhallToString expr =
