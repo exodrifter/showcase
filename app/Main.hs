@@ -1,5 +1,6 @@
 module Main where
 
+import qualified Control.Concurrent.Async as Async
 import qualified Data.Aeson as Aeson
 import qualified Data.Text as T
 import qualified Dhall
@@ -9,8 +10,8 @@ import qualified Dhall.Map as Map
 import qualified Network.Wai.Application.Static as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Path
+import qualified Showcase.Internal.FileWatch as FileWatch
 import qualified System.Directory as Directory
-import qualified System.FSNotify as FSNotify
 import qualified Text.DocLayout as DocLayout
 import qualified Text.DocTemplates as DocTemplates
 import Path ((</>), Path, Abs, Dir, File, Rel)
@@ -24,62 +25,37 @@ main :: IO ()
 main = do
   showcaseContext <- defaultShowcaseContext
 
-  putStrLn "Setting up FSNotify..."
-  FSNotify.withManager $ \manager -> do
-    _ <- FSNotify.watchDir
-      manager
-      (Path.fromAbsDir (dataPath showcaseContext))
-      (const True)
-      (processFSNotifyEvent showcaseContext)
+  putStrLn "Recompiling HTML..."
+  runShowcase showcaseContext $ do
+    liftIO (Directory.removePathForcibly
+      (Path.fromAbsDir (distPath showcaseContext)))
+    compileAllHTML
 
-    putStrLn "Recompiling HTML..."
-    runShowcase showcaseContext $ do
-      liftIO (Directory.removePathForcibly
-        (Path.fromAbsDir (distPath showcaseContext)))
-      compileAllHTML
+  Async.concurrently_
+    ( FileWatch.directory
+        (dataPath showcaseContext)
+        (processFileWatchEvent showcaseContext)
+    )
+    (runServer showcaseContext)
 
-    putStrLn "Running webserver on 8000..."
-    let waiSettings =
-          Wai.defaultWebAppSettings
-            (Path.fromAbsDir (distPath showcaseContext))
-    Warp.run 8000 (Wai.staticApp waiSettings)
+runServer :: ShowcaseContext -> IO ()
+runServer showcaseContext = do
+  putStrLn "Running webserver on 8000..."
+  let waiSettings =
+        Wai.defaultWebAppSettings
+          (Path.fromAbsDir (distPath showcaseContext))
+  Warp.run 8000 (Wai.staticApp waiSettings)
 
-processFSNotifyEvent :: ShowcaseContext -> FSNotify.Event -> IO ()
-processFSNotifyEvent showcaseContext event = do
+processFileWatchEvent :: ShowcaseContext -> FileWatch.Event -> IO ()
+processFileWatchEvent showcaseContext event = do
   let processFile filePath
         | isDataFile filePath = compileHTML filePath
         | otherwise = compileAllHTML
 
   runShowcase showcaseContext $ do
     case event of
-      FSNotify.Added { FSNotify.eventPath = filePath } ->
-        case Path.parseAbsFile filePath of
-          Just absFilePath ->
-            processFile absFilePath
-          Nothing ->
-            pure ()
-      FSNotify.Modified { FSNotify.eventPath = filePath } ->
-        case Path.parseAbsFile filePath of
-          Just absFilePath ->
-            processFile absFilePath
-          Nothing ->
-            pure ()
-      FSNotify.Removed { FSNotify.eventPath = filePath } -> do
-        case Path.parseAbsFile filePath of
-          Just absFilePath ->
-            removeHTML absFilePath
-          Nothing ->
-            pure ()
-
-      FSNotify.ModifiedAttributes {} ->
-        pure ()
-      FSNotify.WatchedDirectoryRemoved {} ->
-        pure ()
-      FSNotify.CloseWrite {} ->
-        pure ()
-
-      FSNotify.Unknown { FSNotify.eventString = eventString } ->
-        putStrLn ("Unknown event: " <> eventString)
+      FileWatch.FileUpdated file -> processFile file
+      FileWatch.FileRemoved file -> removeHTML file
 
 compileAllHTML :: Showcase ()
 compileAllHTML = do
