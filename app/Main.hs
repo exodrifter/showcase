@@ -7,7 +7,6 @@ import qualified Network.Wai.Handler.Warp as Warp
 import qualified System.Directory as Directory
 import qualified System.FilePath as FilePath
 import qualified System.FSNotify as FSNotify
-import Data.Foldable (traverse_)
 import System.FilePath ((</>))
 
 main :: IO ()
