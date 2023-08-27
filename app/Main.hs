@@ -1,12 +1,14 @@
 module Main where
 
 import qualified Control.Concurrent.Async as Async
+import qualified Control.Concurrent.MVar as MVar
 import qualified Data.Aeson as Aeson
+import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Dhall
 import qualified Dhall.Core as Core
 import qualified Dhall.JSON as DhallJSON
-import qualified Dhall.Map as Map
+import qualified Dhall.Map as DhallMap
 import qualified Network.Wai.Application.Static as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Path
@@ -29,7 +31,7 @@ main = do
   runShowcase showcaseContext $ do
     liftIO (Directory.removePathForcibly
       (Path.fromAbsDir (distPath showcaseContext)))
-    compileAllHTML
+    compileAllHTML =<< asks dataPath
 
   Async.concurrently_
     ( FileWatch.directory
@@ -50,61 +52,69 @@ processFileWatchEvent :: ShowcaseContext -> FileWatch.Event -> IO ()
 processFileWatchEvent showcaseContext event = do
   let processFile filePath
         | isDataFile filePath = compileHTML filePath
-        | otherwise = compileAllHTML
+        | otherwise = compileAllHTML =<< asks dataPath
 
   runShowcase showcaseContext $ do
     case event of
       FileWatch.FileUpdated file -> processFile file
       FileWatch.FileRemoved file -> removeHTML file
 
-compileAllHTML :: Showcase ()
-compileAllHTML = do
-  dataFolder <- asks dataPath
-  listDirResult <- liftIO (Directory.listDirectory (Path.fromAbsDir dataFolder))
-  let relativePaths = concatMap Path.parseRelFile listDirResult
-  let absolutePaths = (dataFolder </>) <$> relativePaths
-      filesToCompile = filter isDataFile absolutePaths
+compileAllHTML :: Path Abs Dir -> Showcase ()
+compileAllHTML folder = do
+  listDirResult <- liftIO (Directory.listDirectory (Path.fromAbsDir folder))
+  let relativeFiles = concatMap Path.parseRelFile listDirResult
+      absoluteFiles = (folder </>) <$> relativeFiles
+      filesToCompile = filter isDataFile absoluteFiles
   traverse_ compileHTML filesToCompile
+
+  let relativeDirs = concatMap Path.parseRelDir listDirResult
+      absoluteDirs = (folder </>) <$> relativeDirs
+  dirsResult <- filterM (liftIO . Directory.doesDirectoryExist) (Path.fromAbsDir <$> absoluteDirs)
+  traverse_ compileAllHTML (concatMap Path.parseAbsDir dirsResult)
 
 compileHTML :: Path Abs File -> Showcase ()
 compileHTML filePath = do
-  mDistFile <- makeDistFilePath filePath
-  case mDistFile of
-    Nothing ->
-      pure ()
+  expr <- liftIO (Dhall.inputExpr (T.pack (Path.fromAbsFile filePath)))
+  case dhallToItem expr of
+    Left err ->
+      putStrLn ("Cannot read " <> Path.fromAbsFile filePath <> "; " <> show err)
 
-    Just distFile -> do
-      expr <- liftIO (Dhall.inputExpr (T.pack (Path.fromAbsFile filePath)))
-      case dhallToItem expr of
+    Right item -> do
+      res <- liftIO (DocTemplates.compileTemplateFile (templatePath item))
+      case res of
         Left err ->
-          putStrLn ("Cannot read " <> Path.fromAbsFile filePath <> "; " <> show err)
+          putStrLn ("Cannot compile template " <> templatePath item <> "; " <> err)
 
-        Right item -> do
-          res <- liftIO (DocTemplates.compileTemplateFile (templatePath item))
-          case res of
-            Left err ->
-              putStrLn ("Cannot compile template " <> templatePath item <> "; " <> err)
+        Right template -> do
+          let
+            doc = DocTemplates.renderTemplate template (metadata item)
+            renderedText = DocLayout.render Nothing doc
 
-            Right template -> do
-              let
-                doc = DocTemplates.renderTemplate template (metadata item)
-                renderedText = DocLayout.render Nothing doc
+          -- TODO: Debouncing?
+          case Path.parseRelFile (distURI item) of
+            Nothing ->
+              putStrLn "Cannot convert distURI to a path"
+            Just relPath -> do
+              distFolder <- asks distPath
+              let path = distFolder </> relPath
 
-              -- TODO: Debouncing?
-              putStrLn ("Writing " <> Path.fromAbsFile distFile <> "...")
-              liftIO (Directory.createDirectoryIfMissing True "dist")
-              writeFile (Path.fromAbsFile distFile) renderedText
+              -- Remove the old file if it's a different name
+              oldFile <- updateDistMap filePath path
+              traverse_ removeFile oldFile
+
+              putStrLn ("Writing " <> Path.fromAbsFile path <> "...")
+              liftIO (Directory.createDirectoryIfMissing True (Path.fromAbsDir (Path.parent path)))
+              writeFile (Path.fromAbsFile path) renderedText
 
 removeHTML :: Path Abs File -> Showcase ()
 removeHTML filePath = do
-  mDistFile <- makeDistFilePath filePath
-  case mDistFile of
-    Nothing -> do
-      pure ()
+  uri <- removeFromDistMap filePath
+  traverse_ removeFile uri
 
-    Just distFile -> do
-      putStrLn ("Removing " <> Path.fromAbsFile distFile <> "...")
-      liftIO (Directory.removeFile (Path.fromAbsFile distFile))
+removeFile :: Path Abs File -> Showcase ()
+removeFile uri = do
+  putStrLn ("Removing " <> Path.fromAbsFile uri <> "...")
+  liftIO (Directory.removeFile (Path.fromAbsFile uri))
 
 -- Tries to create the path of the corresponding dist file.
 makeDistFilePath :: Path Abs File -> Showcase (Maybe (Path Abs File))
@@ -151,6 +161,8 @@ data ShowcaseContext =
       -- ^ The relative path to the directory containing the source data.
     , relDistPath :: Path Rel Dir
       -- ^ The relative path to the directory containing the generated files.
+
+    , distMap :: MVar (Map (Path Abs File) (Path Abs File))
     }
 
 dataPath :: ShowcaseContext -> Path Abs Dir
@@ -161,6 +173,24 @@ distPath :: ShowcaseContext -> Path Abs Dir
 distPath context =
   workingPath context </> relDistPath context
 
+removeFromDistMap :: Path Abs File -> Showcase (Maybe (Path Abs File))
+removeFromDistMap file = do
+  distMapMVar <- asks distMap
+  liftIO $ MVar.modifyMVar distMapMVar $ \dm ->
+    pure (Map.delete file dm, Map.lookup file dm)
+
+updateDistMap :: Path Abs File -> Path Abs File -> Showcase (Maybe (Path Abs File))
+updateDistMap file uri = do
+  distMapMVar <- asks distMap
+  liftIO $ MVar.modifyMVar distMapMVar $ \dm ->
+    let
+      oldPath =
+        if Map.lookup file dm == Just uri
+        then Nothing
+        else Map.lookup file dm
+    in
+      pure (Map.insert file uri dm, oldPath)
+
 -- | Creates the default showcase context, which assumes that the working
 -- directory is the same as the current working directory.
 defaultShowcaseContext :: IO ShowcaseContext
@@ -169,6 +199,7 @@ defaultShowcaseContext = do
     <$> (Path.parseAbsDir =<< Directory.makeAbsolute ".")
     <*> Path.parseRelDir "data"
     <*> Path.parseRelDir "dist"
+    <*> newMVar mempty
 
 --------------------------------------------------------------------------------
 -- Dhall Types
@@ -177,28 +208,38 @@ defaultShowcaseContext = do
 data Item =
   Item
     { templatePath :: FilePath
+    , distURI :: String
     , metadata :: Aeson.Value
     }
 
-dhallToString :: Core.Expr Void Void -> Either DhallJSON.CompileError String
+dhallToString :: Core.Expr Void Void -> Either Text String
 dhallToString expr =
   case expr of
     Core.TextLit (Core.Chunks [] t) -> pure (T.unpack t)
-    _ -> Left (DhallJSON.Unsupported expr)
+    _ -> Left "Unexpected type; expected string"
 
-dhallToItem :: Core.Expr s Void -> Either DhallJSON.CompileError Item
+dhallToJSON :: Core.Expr Void Void -> Either Text Aeson.Value
+dhallToJSON expr =
+  case DhallJSON.dhallToJSON expr of
+    Right a -> pure a
+    Left err -> Left (T.pack (show err))
+
+dhallToItem :: Core.Expr s Void -> Either Text Item
 dhallToItem expr =
   let
     e = Core.alphaNormalize (Core.normalize expr)
   in
     case e of
       Core.RecordLit a ->
-        case (Map.lookup "template" a, Map.lookup "data" a) of
-          (Just t, Just d) -> do
-            p <- dhallToString (Core.recordFieldValue t)
-            v <- DhallJSON.dhallToJSON (Core.recordFieldValue d)
-            pure Item { templatePath = p, metadata = v }
-          _ ->
-            Left (DhallJSON.Unsupported e)
+        Item
+          <$> (dhallToString =<< dhallLookup "template" a)
+          <*> (dhallToString =<< dhallLookup "distUri" a)
+          <*> (dhallToJSON =<< dhallLookup "data" a)
       _ ->
-        Left (DhallJSON.Unsupported e)
+        Left "Unsupported type"
+
+dhallLookup :: Text -> DhallMap.Map Text (Core.RecordField s a) -> Either Text (Core.Expr s a)
+dhallLookup key m =
+  case DhallMap.lookup key m of
+    Just a -> Right (Core.recordFieldValue a)
+    Nothing -> Left ("Cannot find key " <> key)

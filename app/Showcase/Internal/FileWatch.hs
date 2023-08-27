@@ -16,7 +16,7 @@ data Event =
 directory :: Path Abs Dir -> (Event -> IO ()) -> IO ()
 directory dir callback =
   FSNotify.withManager $ \manager -> do
-    _ <- FSNotify.watchDir
+    _ <- FSNotify.watchTree
       manager
       (Path.fromAbsDir dir)
       (const True)

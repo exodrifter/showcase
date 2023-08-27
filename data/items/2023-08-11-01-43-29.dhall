@@ -1,6 +1,7 @@
-let Website = ./website.dhall
+let Website = ../website.dhall
 
 in  { template = "data/vod.html"
+    , distUri = "2023/08/10/0143.html"
     , data =
         Website.processSchema
           { duration = 13716
