@@ -2,23 +2,30 @@ module Main where
 
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.MVar as MVar
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Dhall
 import qualified Network.Wai.Application.Static as Wai
 import qualified Network.Wai.Handler.Warp as Warp
-import qualified Path
 import qualified Showcase.Internal.FileWatch as FileWatch
+import qualified Showcase.Types.Route as Route
 import qualified System.Directory as Directory
+import qualified System.FilePath as FilePath
 import qualified Text.DocLayout as DocLayout
 import qualified Text.DocTemplates as DocTemplates
-import qualified Showcase.Types.Route as Route
-import Path ((</>), Path, Abs, Dir, File, Rel)
+import System.FilePath ((</>))
 
-isDataFile :: Path b File -> Bool
+isDataFile :: FilePath -> Bool
 isDataFile filePath =
-     Path.fromRelFile (Path.filename filePath) /= "website.dhall"
-  && Path.fileExtension filePath == Just ".dhall"
+     FilePath.takeBaseName filePath /= "website"
+  && FilePath.takeExtension filePath == ".dhall"
+
+lookupDataFolder :: IO FilePath
+lookupDataFolder = Directory.makeAbsolute "data/"
+
+lookupDistFolder :: IO FilePath
+lookupDistFolder = Directory.makeAbsolute "dist/"
 
 main :: IO ()
 main = do
@@ -26,8 +33,7 @@ main = do
 
   putStrLn "Recompiling HTML..."
   runShowcase showcaseContext $ do
-    liftIO (Directory.removePathForcibly
-      (Path.fromAbsDir (distPath showcaseContext)))
+    liftIO (Directory.removePathForcibly (distPath showcaseContext))
     compileAllHTML =<< asks dataPath
 
   Async.concurrently_
@@ -41,8 +47,7 @@ runServer :: ShowcaseContext -> IO ()
 runServer showcaseContext = do
   putStrLn "Running webserver on 8000..."
   let waiSettings =
-        Wai.defaultWebAppSettings
-          (Path.fromAbsDir (distPath showcaseContext))
+        Wai.defaultWebAppSettings (distPath showcaseContext)
   Warp.run 8000 (Wai.staticApp waiSettings)
 
 processFileWatchEvent :: ShowcaseContext -> FileWatch.Event -> IO ()
@@ -56,25 +61,23 @@ processFileWatchEvent showcaseContext event = do
       FileWatch.FileUpdated file -> processFile file
       FileWatch.FileRemoved file -> removeHTML file
 
-compileAllHTML :: Path Abs Dir -> Showcase ()
+compileAllHTML :: FilePath -> Showcase ()
 compileAllHTML folder = do
-  listDirResult <- liftIO (Directory.listDirectory (Path.fromAbsDir folder))
-  let relativeFiles = concatMap Path.parseRelFile listDirResult
-      absoluteFiles = (folder </>) <$> relativeFiles
+  listDirResult <- liftIO (Directory.listDirectory folder)
+  let absoluteFiles = (folder </>) <$> listDirResult
       filesToCompile = filter isDataFile absoluteFiles
   traverse_ compileHTML filesToCompile
 
-  let relativeDirs = concatMap Path.parseRelDir listDirResult
-      absoluteDirs = (folder </>) <$> relativeDirs
-  dirsResult <- filterM (liftIO . Directory.doesDirectoryExist) (Path.fromAbsDir <$> absoluteDirs)
-  traverse_ compileAllHTML (concatMap Path.parseAbsDir dirsResult)
+  let absoluteDirs = (folder </>) <$> listDirResult
+  dirsResult <- filterM (liftIO . Directory.doesDirectoryExist) absoluteDirs
+  traverse_ compileAllHTML dirsResult
 
-compileHTML :: Path Abs File -> Showcase ()
+compileHTML :: FilePath -> Showcase ()
 compileHTML filePath = do
-  expr <- liftIO (Dhall.inputExpr (T.pack (Path.fromAbsFile filePath)))
+  expr <- liftIO (Dhall.inputExpr (T.pack filePath))
   case Route.dhallToRoute expr of
     Left err ->
-      putStrLn ("Cannot read " <> Path.fromAbsFile filePath <> "; " <> show err)
+      putStrLn ("Cannot read " <> filePath <> "; " <> show err)
 
     Right item -> do
       res <- liftIO (DocTemplates.compileTemplateFile (Route.template item))
@@ -86,48 +89,43 @@ compileHTML filePath = do
           let
             doc = DocTemplates.renderTemplate template (Route.input item)
             renderedText = DocLayout.render Nothing doc
+            uri = Route.uri item
+
+          distFolder <- asks distPath
+          let path = distFolder </> uri
+
+          -- Remove the old file if it's a different name
+          oldFile <- updateDistMap filePath path
+          traverse_ removeFile oldFile
 
           -- TODO: Debouncing?
-          case Path.parseRelFile (Route.uri item) of
-            Nothing ->
-              putStrLn "Cannot convert routeUri to a path"
-            Just relPath -> do
-              distFolder <- asks distPath
-              let path = distFolder </> relPath
+          putStrLn ("Writing " <> path <> "...")
+          liftIO (Directory.createDirectoryIfMissing True (FilePath.takeDirectory path))
+          writeFile path renderedText
 
-              -- Remove the old file if it's a different name
-              oldFile <- updateDistMap filePath path
-              traverse_ removeFile oldFile
-
-              putStrLn ("Writing " <> Path.fromAbsFile path <> "...")
-              liftIO (Directory.createDirectoryIfMissing True (Path.fromAbsDir (Path.parent path)))
-              writeFile (Path.fromAbsFile path) renderedText
-
-removeHTML :: Path Abs File -> Showcase ()
+removeHTML :: FilePath -> Showcase ()
 removeHTML filePath = do
   uri <- removeFromDistMap filePath
   traverse_ removeFile uri
 
-removeFile :: Path Abs File -> Showcase ()
+removeFile :: FilePath -> Showcase ()
 removeFile uri = do
-  putStrLn ("Removing " <> Path.fromAbsFile uri <> "...")
-  liftIO (Directory.removeFile (Path.fromAbsFile uri))
+  putStrLn ("Removing " <> uri <> "...")
+  liftIO (Directory.removeFile uri)
 
 -- Tries to create the path of the corresponding dist file.
-makeDistFilePath :: Path Abs File -> Showcase (Maybe (Path Abs File))
+makeDistFilePath :: FilePath -> Showcase (Maybe FilePath)
 makeDistFilePath filePath = do
   dataFolder <- asks dataPath
   distFolder <- asks distPath
 
-  if dataFolder `Path.isProperPrefixOf` filePath
+  if dataFolder `isPrefixOf` filePath
   then
     pure $ do
-      relFile <- Path.stripProperPrefix dataFolder filePath
-      distFile <- Path.replaceExtension ".html" relFile
-      Just (distFolder </> distFile)
+      relFile <- List.stripPrefix dataFolder filePath
+      Just (distFolder </> FilePath.replaceExtension "html" relFile)
   else
     pure Nothing
-
 
 --------------------------------------------------------------------------------
 -- Monad Stack
@@ -152,31 +150,31 @@ runShowcase context (Showcase showcase) = do
 -- | Contains variables commonly used throughout all Showcase operations.
 data ShowcaseContext =
   ShowcaseContext
-    { workingPath :: Path Abs Dir
+    { workingPath :: FilePath
       -- ^ The absolute path that all relative paths will be relative to.
-    , relDataPath :: Path Rel Dir
+    , relDataPath :: FilePath
       -- ^ The relative path to the directory containing the source data.
-    , relDistPath :: Path Rel Dir
+    , relDistPath :: FilePath
       -- ^ The relative path to the directory containing the generated files.
 
-    , distMap :: MVar (Map (Path Abs File) (Path Abs File))
+    , distMap :: MVar (Map FilePath FilePath)
     }
 
-dataPath :: ShowcaseContext -> Path Abs Dir
+dataPath :: ShowcaseContext -> FilePath
 dataPath context =
   workingPath context </> relDataPath context
 
-distPath :: ShowcaseContext -> Path Abs Dir
+distPath :: ShowcaseContext -> FilePath
 distPath context =
   workingPath context </> relDistPath context
 
-removeFromDistMap :: Path Abs File -> Showcase (Maybe (Path Abs File))
+removeFromDistMap :: FilePath -> Showcase (Maybe FilePath)
 removeFromDistMap file = do
   distMapMVar <- asks distMap
   liftIO $ MVar.modifyMVar distMapMVar $ \dm ->
     pure (Map.delete file dm, Map.lookup file dm)
 
-updateDistMap :: Path Abs File -> Path Abs File -> Showcase (Maybe (Path Abs File))
+updateDistMap :: FilePath -> FilePath -> Showcase (Maybe FilePath)
 updateDistMap file uri = do
   distMapMVar <- asks distMap
   liftIO $ MVar.modifyMVar distMapMVar $ \dm ->
@@ -192,8 +190,11 @@ updateDistMap file uri = do
 -- directory is the same as the current working directory.
 defaultShowcaseContext :: IO ShowcaseContext
 defaultShowcaseContext = do
-  ShowcaseContext
-    <$> (Path.parseAbsDir =<< Directory.makeAbsolute ".")
-    <*> Path.parseRelDir "data"
-    <*> Path.parseRelDir "dist"
-    <*> newMVar mempty
+  cwd <- Directory.makeAbsolute "."
+  mvar <- newMVar mempty
+  pure ShowcaseContext
+    { workingPath = cwd
+    , relDataPath = "data/"
+    , relDistPath = "dist/"
+    , distMap = mvar
+    }

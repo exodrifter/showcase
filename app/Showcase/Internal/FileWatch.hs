@@ -5,49 +5,33 @@ module Showcase.Internal.FileWatch
   ) where
 
 import qualified System.FSNotify as FSNotify
-import Control.Concurrent (threadDelay)
-import qualified Path
-import Path (Path, Abs, Dir, File)
+import qualified Control.Concurrent as Concurrent
 
 data Event =
-    FileUpdated (Path Abs File)
-  | FileRemoved (Path Abs File)
+    FileUpdated FilePath
+  | FileRemoved FilePath
 
-directory :: Path Abs Dir -> (Event -> IO ()) -> IO ()
+directory :: FilePath -> (Event -> IO ()) -> IO ()
 directory dir callback =
   FSNotify.withManager $ \manager -> do
     _ <- FSNotify.watchTree
       manager
-      (Path.fromAbsDir dir)
+      dir
       (const True)
       (processFSNotifyEvent callback)
 
     -- Sleep forever
-    forever (threadDelay 1000000)
+    forever (Concurrent.threadDelay 1000000)
 
 processFSNotifyEvent :: (Event -> IO ()) -> FSNotify.Event -> IO ()
 processFSNotifyEvent callback event = do
   case event of
     FSNotify.Added { FSNotify.eventPath = path } ->
-      case Path.parseAbsFile path of
-        Just absFilePath ->
-          callback (FileUpdated absFilePath)
-        Nothing ->
-          pure ()
-
+      callback (FileUpdated path)
     FSNotify.Modified { FSNotify.eventPath = path } ->
-      case Path.parseAbsFile path of
-        Just absFilePath ->
-          callback (FileUpdated absFilePath)
-        Nothing ->
-          pure ()
-
-    FSNotify.Removed { FSNotify.eventPath = path } -> do
-      case Path.parseAbsFile path of
-        Just absFilePath ->
-          callback (FileRemoved absFilePath)
-        Nothing ->
-          pure ()
+      callback (FileUpdated path)
+    FSNotify.Removed { FSNotify.eventPath = path } ->
+      callback (FileRemoved path)
 
     FSNotify.ModifiedAttributes {} ->
       pure ()
