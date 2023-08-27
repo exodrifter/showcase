@@ -2,13 +2,9 @@ module Main where
 
 import qualified Control.Concurrent.Async as Async
 import qualified Control.Concurrent.MVar as MVar
-import qualified Data.Aeson as Aeson
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Dhall
-import qualified Dhall.Core as Core
-import qualified Dhall.JSON as DhallJSON
-import qualified Dhall.Map as DhallMap
 import qualified Network.Wai.Application.Static as Wai
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Path
@@ -16,6 +12,7 @@ import qualified Showcase.Internal.FileWatch as FileWatch
 import qualified System.Directory as Directory
 import qualified Text.DocLayout as DocLayout
 import qualified Text.DocTemplates as DocTemplates
+import qualified Showcase.Types.Route as Route
 import Path ((</>), Path, Abs, Dir, File, Rel)
 
 isDataFile :: Path b File -> Bool
@@ -75,25 +72,25 @@ compileAllHTML folder = do
 compileHTML :: Path Abs File -> Showcase ()
 compileHTML filePath = do
   expr <- liftIO (Dhall.inputExpr (T.pack (Path.fromAbsFile filePath)))
-  case dhallToItem expr of
+  case Route.dhallToRoute expr of
     Left err ->
       putStrLn ("Cannot read " <> Path.fromAbsFile filePath <> "; " <> show err)
 
     Right item -> do
-      res <- liftIO (DocTemplates.compileTemplateFile (templatePath item))
+      res <- liftIO (DocTemplates.compileTemplateFile (Route.template item))
       case res of
         Left err ->
-          putStrLn ("Cannot compile template " <> templatePath item <> "; " <> err)
+          putStrLn ("Cannot compile template " <> Route.template item <> "; " <> err)
 
         Right template -> do
           let
-            doc = DocTemplates.renderTemplate template (metadata item)
+            doc = DocTemplates.renderTemplate template (Route.input item)
             renderedText = DocLayout.render Nothing doc
 
           -- TODO: Debouncing?
-          case Path.parseRelFile (distURI item) of
+          case Path.parseRelFile (Route.uri item) of
             Nothing ->
-              putStrLn "Cannot convert distURI to a path"
+              putStrLn "Cannot convert routeUri to a path"
             Just relPath -> do
               distFolder <- asks distPath
               let path = distFolder </> relPath
@@ -200,46 +197,3 @@ defaultShowcaseContext = do
     <*> Path.parseRelDir "data"
     <*> Path.parseRelDir "dist"
     <*> newMVar mempty
-
---------------------------------------------------------------------------------
--- Dhall Types
---------------------------------------------------------------------------------
-
-data Item =
-  Item
-    { templatePath :: FilePath
-    , distURI :: String
-    , metadata :: Aeson.Value
-    }
-
-dhallToString :: Core.Expr Void Void -> Either Text String
-dhallToString expr =
-  case expr of
-    Core.TextLit (Core.Chunks [] t) -> pure (T.unpack t)
-    _ -> Left "Unexpected type; expected string"
-
-dhallToJSON :: Core.Expr Void Void -> Either Text Aeson.Value
-dhallToJSON expr =
-  case DhallJSON.dhallToJSON expr of
-    Right a -> pure a
-    Left err -> Left (T.pack (show err))
-
-dhallToItem :: Core.Expr s Void -> Either Text Item
-dhallToItem expr =
-  let
-    e = Core.alphaNormalize (Core.normalize expr)
-  in
-    case e of
-      Core.RecordLit a ->
-        Item
-          <$> (dhallToString =<< dhallLookup "template" a)
-          <*> (dhallToString =<< dhallLookup "distUri" a)
-          <*> (dhallToJSON =<< dhallLookup "data" a)
-      _ ->
-        Left "Unsupported type"
-
-dhallLookup :: Text -> DhallMap.Map Text (Core.RecordField s a) -> Either Text (Core.Expr s a)
-dhallLookup key m =
-  case DhallMap.lookup key m of
-    Just a -> Right (Core.recordFieldValue a)
-    Nothing -> Left ("Cannot find key " <> key)

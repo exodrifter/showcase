@@ -1,8 +1,8 @@
 let Website = ../website.dhall
 
 in  { template = "data/vod.html"
-    , distUri = "2023/08/10/0143.html"
-    , data =
+    , uri = "2023/08/10/0143.html"
+    , input =
         Website.processSchema
           { duration = 13716
           , shorts =
