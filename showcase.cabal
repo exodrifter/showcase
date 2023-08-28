@@ -26,6 +26,7 @@ executable showcase
     hs-source-dirs: app
     other-modules:
         Showcase.Internal.FileWatch,
+        Showcase.Types.EntryPoint,
         Showcase.Types.Route
 
     default-language: Haskell2010

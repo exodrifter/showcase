@@ -1,6 +1,6 @@
-let Website = ../website.dhall
+let Website = ./vod.dhall
 
-in  { template = "data/vod.html"
+in  { template = "data/vod/template.html"
     , uri = "2023/08/10/0143.html"
     , input =
         Website.processSchema

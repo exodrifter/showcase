@@ -4,6 +4,7 @@ module Showcase.Types.Route
   , uri
   , input
   , dhallToRoute
+  , dhallToRoutes
   ) where
 
 import qualified Data.Aeson as Aeson
@@ -46,6 +47,17 @@ dhallToRoute expr =
           <$> (dhallToString =<< dhallLookup "template" a)
           <*> (dhallToString =<< dhallLookup "uri" a)
           <*> (dhallToJSON =<< dhallLookup "input" a)
+      _ ->
+        Left "Unsupported type"
+
+dhallToRoutes :: Core.Expr s Void -> Either Text [Route]
+dhallToRoutes expr =
+  let
+    e = Core.alphaNormalize (Core.normalize expr)
+  in
+    case e of
+      Core.ListLit _ a -> do
+        toList <$> traverse dhallToRoute a
       _ ->
         Left "Unsupported type"
 
