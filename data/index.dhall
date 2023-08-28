@@ -12,9 +12,17 @@ let indices =
     }
   ]
 
+let pages =
+  [ { template = "data/page/index.html"
+    , uri = "index.html"
+    , input = {=}
+    }
+  ]
+
 in
   { routes =
     { vods
     , indices
+    , pages
     }
   }
