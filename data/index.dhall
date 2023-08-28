@@ -15,7 +15,6 @@ let indices =
 let pages =
   [ { template = "data/page/index.html"
     , uri = "index.html"
-    , input = {=}
     }
   ]
 

@@ -43,10 +43,17 @@ dhallToRoute expr =
   in
     case e of
       Core.RecordLit a ->
-        Route
-          <$> (dhallToString =<< dhallLookup "template" a)
-          <*> (dhallToString =<< dhallLookup "uri" a)
-          <*> (dhallToJSON =<< dhallLookup "input" a)
+        case dhallLookup "input" a of
+          Right i ->
+            Route
+              <$> (dhallToString =<< dhallLookup "template" a)
+              <*> (dhallToString =<< dhallLookup "uri" a)
+              <*> dhallToJSON i
+          Left _ ->
+            Route
+              <$> (dhallToString =<< dhallLookup "template" a)
+              <*> (dhallToString =<< dhallLookup "uri" a)
+              <*> pure (Aeson.Object mempty)
       _ ->
         Left "Unsupported type"
 
